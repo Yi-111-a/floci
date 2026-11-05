@@ -253,6 +253,128 @@ public class CloudFormationService implements ResourceProvider {
         });
     }
 
+    // ── Stack policies ───────────────────────────────────────────────────────
+
+    /**
+     * Measures a policy body against what AWS rejects as "Invalid stack policy": it must parse
+     * as JSON, be an object, carry a {@code Statement} with at least one statement object, and
+     * every statement must name an {@code Effect} of Allow or Deny and exactly one of
+     * {@code Action} and {@code NotAction}.
+     */
+    private boolean isValidStackPolicy(String policyBody) {
+        JsonNode root;
+        try {
+            root = objectMapper.readTree(policyBody);
+        } catch (Exception e) {
+            return false;
+        }
+        if (root == null || !root.isObject()) {
+            return false;
+        }
+        JsonNode statement = root.get("Statement");
+        if (statement == null) {
+            return false;
+        }
+        if (statement.isObject()) {
+            return isValidStackPolicyStatement(statement);
+        }
+        if (!statement.isArray() || statement.isEmpty()) {
+            return false;
+        }
+        for (JsonNode entry : statement) {
+            if (!entry.isObject() || !isValidStackPolicyStatement(entry)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean isValidStackPolicyStatement(JsonNode statement) {
+        JsonNode effect = statement.get("Effect");
+        if (effect == null || !effect.isTextual()
+                || (!"Allow".equals(effect.asText()) && !"Deny".equals(effect.asText()))) {
+            return false;
+        }
+        boolean hasAction = isValidPolicyActionListing(statement.get("Action"));
+        boolean hasNotAction = isValidPolicyActionListing(statement.get("NotAction"));
+        return hasAction != hasNotAction;
+    }
+
+    private boolean isValidPolicyActionListing(JsonNode node) {
+        if (node == null) {
+            return false;
+        }
+        if (node.isTextual()) {
+            return !node.asText().isBlank();
+        }
+        if (!node.isArray() || node.isEmpty()) {
+            return false;
+        }
+        for (JsonNode entry : node) {
+            if (!entry.isTextual()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Validates a policy submitted with {@code StackPolicyBody} or {@code StackPolicyURL} on the
+     * path named by {@code context}, resolving the URL source through S3 the way a
+     * {@code TemplateURL} is resolved. Returns the body to store.
+     */
+    public String validateStackPolicyBody(String stackPolicyBody, String stackPolicyUrl, String context) {
+        String body = resolveTemplateBody(stackPolicyBody, stackPolicyUrl);
+        if (body != null && !body.isBlank() && isValidStackPolicy(body)) {
+            return body;
+        }
+        throw new AwsException("ValidationError", context, 400);
+    }
+
+    /** The stack a policy action names, which on AWS reports "Stack: name does not exist". */
+    public Stack getStackForPolicy(String stackNameOrArn, String region) {
+        Stack stack = resolveStack(stackNameOrArn, region);
+        if (stack == null) {
+            throw new AwsException("ValidationError", CONTINUE_STACK_MISSING.formatted(stackNameOrArn), 400);
+        }
+        return stack;
+    }
+
+    /**
+     * Refuses SetStackPolicy while the stack is mid operation or already gone, as AWS does. The
+     * caller reaches here after the stack resolves, so an in-place check keeps the refusals in
+     * the order AWS applies them.
+     */
+    public void checkSetStackPolicyState(Stack stack) {
+        String status = stack.getStatus();
+        if (status.endsWith("_IN_PROGRESS")
+                || "ROLLBACK_COMPLETE".equals(status)
+                || "DELETE_COMPLETE".equals(status)) {
+            throw new AwsException("ValidationError",
+                    "SetStackPolicy cannot be called when stack is in the " + status + " state", 400);
+        }
+    }
+
+    /** Stores a policy accepted with a create or an update; a stack that vanished is tolerated. */
+    public void storeStackPolicyOnStack(Stack stack, String policyBody) {
+        stack.setStackPolicyBody(policyBody);
+        persistStack(stack);
+    }
+
+    /** Stores a policy accepted with a create or an update; a stack that vanished is tolerated. */
+    public void storeStackPolicy(String stackId, String policyBody, String region) {
+        String accountId = currentAccount();
+        for (Stack stack : stacks.values()) {
+            if (!accountId.equals(ownerAccount(stack)) || !region.equals(stack.getRegion())
+                    || !stackId.equals(stack.getStackId())) {
+                continue;
+            }
+            stack.setStackPolicyBody(policyBody);
+            persistStack(stack);
+            break;
+        }
+    }
+
     // ── DescribeStacks ────────────────────────────────────────────────────────
 
     public List<Stack> describeStacks(String stackName, String region) {

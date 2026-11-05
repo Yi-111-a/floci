@@ -65,8 +65,8 @@ public class CloudFormationQueryHandler {
             case "ValidateTemplate" -> validateTemplate(params);
             case "ListStacks" -> listStacks(params, region);
             case "ListExports" -> listExports(params, region);
-            case "SetStackPolicy" -> Response.ok(emptyResult("SetStackPolicyResponse")).build();
-            case "GetStackPolicy" -> Response.ok(emptyResult("GetStackPolicyResponse")).build();
+            case "SetStackPolicy" -> setStackPolicy(params, region);
+            case "GetStackPolicy" -> getStackPolicy(params, region);
             case "DescribeStackResource" -> describeStackResource(params, region);
             case "DescribeOrganizationsAccess" -> describeOrganizationsAccess();
             case "ActivateOrganizationsAccess" -> activateOrganizationsAccess();
@@ -119,6 +119,9 @@ public class CloudFormationQueryHandler {
         Map<String, String> tags = extractTags(params);
 
         boolean terminationProtection = Boolean.parseBoolean(params.getFirst("EnableTerminationProtection"));
+        String stackPolicy = cfnService.validateStackPolicyBody(params.getFirst("StackPolicyBody"),
+                params.getFirst("StackPolicyURL"),
+                "Error validating stack policy to be applied after stack creation: Invalid stack policy");
         ChangeSet initial = cfnService.createChangeSetForCreateStack(stackName, "initial-create",
                 templateBody, templateUrl, parameters, capabilities, tags, region,
                 terminationProtection);
@@ -129,6 +132,9 @@ public class CloudFormationQueryHandler {
                 cfnService.clearProtectionAfterRejectedCreate(stackName, initial, region);
             }
             throw e;
+        }
+        if (stackPolicy != null) {
+            cfnService.storeStackPolicy(initial.getStackId(), stackPolicy, region);
         }
 
         String xml = new XmlBuilder()
@@ -154,6 +160,9 @@ public class CloudFormationQueryHandler {
                 extractParameters(params, cfnService.currentParameters(stackName, region));
         List<String> capabilities = extractList(params, "Capabilities.member.");
         Map<String, String> tags = extractTags(params);
+        String stackPolicy = cfnService.validateStackPolicyBody(params.getFirst("StackPolicyBody"),
+                params.getFirst("StackPolicyURL"),
+                "Error validating stack policy to be applied after stack update: Invalid stack policy");
 
         String changeSetName = "update-" + UUID.randomUUID().toString().substring(0, 8);
         ChangeSet cs = usePreviousTemplate
@@ -168,6 +177,9 @@ public class CloudFormationQueryHandler {
             return xmlError("ValidationError", "No updates are to be performed.", 400);
         }
         cfnService.executeChangeSet(cs.getStackId(), cs.getChangeSetId(), region);
+        if (stackPolicy != null) {
+            cfnService.storeStackPolicy(cs.getStackId(), stackPolicy, region);
+        }
 
         String xml = new XmlBuilder()
                 .start("UpdateStackResponse", CF_NS)
@@ -176,6 +188,41 @@ public class CloudFormationQueryHandler {
                 .end("UpdateStackResult")
                 .raw(AwsQueryResponse.responseMetadata())
                 .end("UpdateStackResponse")
+                .build();
+        return Response.ok(xml).type("text/xml").build();
+    }
+
+    // ── Stack policies ───────────────────────────────────────────────────────
+
+    private Response setStackPolicy(MultivaluedMap<String, String> params, String region) {
+        String stackPolicyBody = params.getFirst("StackPolicyBody");
+        String stackPolicyUrl = params.getFirst("StackPolicyURL");
+        boolean hasBody = stackPolicyBody != null && !stackPolicyBody.isBlank();
+        boolean hasUrl = stackPolicyUrl != null && !stackPolicyUrl.isBlank();
+        if (!hasBody && !hasUrl) {
+            // AWS's spelling ("Ether") as measured in issue #7550.
+            return xmlError("ValidationError", "Ether StackPolicyURL or StackPolicyBody must be specified.", 400);
+        }
+        if (hasBody && hasUrl) {
+            return xmlError("ValidationError", "You cannot specify both StackPolicyURL and StackPolicyBody", 400);
+        }
+        Stack stack = cfnService.getStackForPolicy(params.getFirst("StackName"), region);
+        cfnService.checkSetStackPolicyState(stack);
+        String policy = cfnService.validateStackPolicyBody(stackPolicyBody, stackPolicyUrl,
+                "Error validating stack policy: Invalid stack policy");
+        cfnService.storeStackPolicyOnStack(stack, policy);
+        return Response.ok(emptyResult("SetStackPolicyResponse")).build();
+    }
+
+    private Response getStackPolicy(MultivaluedMap<String, String> params, String region) {
+        Stack stack = cfnService.getStackForPolicy(params.getFirst("StackName"), region);
+        String xml = new XmlBuilder()
+                .start("GetStackPolicyResponse", CF_NS)
+                .start("GetStackPolicyResult")
+                .elem("StackPolicyBody", stack.getStackPolicyBody())
+                .end("GetStackPolicyResult")
+                .raw(AwsQueryResponse.responseMetadata())
+                .end("GetStackPolicyResponse")
                 .build();
         return Response.ok(xml).type("text/xml").build();
     }

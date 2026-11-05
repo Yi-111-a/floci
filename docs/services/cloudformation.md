@@ -43,8 +43,8 @@ changing credentials already issued.
 | `ValidateTemplate` | Refuses a body that is no template (see [Template format](#template-format)) and a template holding a `null` value (see [Null values](#null-values)); otherwise returns success without validating further |
 | `ListStacks` | List stacks by status |
 | `ListExports` | - |
-| `SetStackPolicy` | Accepted; no-op (stub — stack policies are not enforced) |
-| `GetStackPolicy` | Accepted; returns an empty policy (stub) |
+| `SetStackPolicy` | Stores the policy body verbatim (or fetched from a `StackPolicyURL` in S3); refuses a stack that does not exist, a stack mid operation or in `ROLLBACK_COMPLETE`/`DELETE_COMPLETE`, and a body that is not a valid policy |
+| `GetStackPolicy` | Returns the last stored policy verbatim (by name or stack id, also for a deleted stack); an empty result when none was stored |
 | `DescribeStackResource` | Get a specific stack resource |
 | `DescribeOrganizationsAccess` | - |
 | `ActivateOrganizationsAccess` | - |
@@ -61,6 +61,14 @@ changing credentials already issued.
 | `DescribeStackSetOperation` | - |
 | `ListStackSetAutoDeploymentTargets` | - |
 <!-- floci:actions:end -->
+
+## Stack policies
+
+`CreateStack` and `UpdateStack` accept `StackPolicyBody` / `StackPolicyURL`, the URL resolved through S3 like a `TemplateURL`. An invalid policy refuses the call itself: `Error validating stack policy to be applied after stack creation: Invalid stack policy` or `... after stack update: ...`. A valid one is stored on the stack as the change set executes.
+
+`SetStackPolicy` replaces the stored body and `GetStackPolicy` returns it verbatim, whitespace included, in any stack state; a stack with no policy answers an empty `GetStackPolicyResult`. A missing stack is refused with `Stack: <name> does not exist`, `SetStackPolicy cannot be called when stack is in the <status> state` for every `*_IN_PROGRESS` status plus `ROLLBACK_COMPLETE` and `DELETE_COMPLETE`, and `SetStackPolicy` refuses a body that is not a policy (not JSON, not an object, no usable `Statement`, an `Effect` other than `Allow` or `Deny`, or both `Action` and `NotAction`) with `Error validating stack policy: Invalid stack policy`.
+
+Deviations from AWS, both left for later work: an `UpdateStack` policy is stored when the update is accepted rather than when it reaches `UPDATE_COMPLETE`, so an update that later rolls back keeps the new body, and a policy-only `UpdateStack` is still refused with `No updates are to be performed.` Stack policies are not enforced against resource updates.
 
 ## StackSets compatibility
 
